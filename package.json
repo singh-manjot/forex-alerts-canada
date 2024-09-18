@@ -1,0 +1,21 @@
+{
+  "name": "forex-alerts-canada",
+  "version": "1.0.0",
+  "description": "Cloud Function for querying forex rates",
+  "main": "index.js",
+  "author": "Manjot Singh <manjotmansks@gmail.com>",
+  "license": "MIT",
+  "dependencies": {
+    "@google-cloud/functions-framework": "^3.4.2",
+    "@sparticuz/chromium": "^127.0.0",
+    "axios": "^1.7.7",
+    "puppeteer": "19.2.2",
+    "puppeteer-core": "^23.4.0",
+    "user-agents": "^1.1.325",
+    "yarn": "^1.22.22"
+  },
+  "scripts": {
+    "start": "functions-framework --target=forexRates",
+    "gcp-build": "node node_modules/puppeteer/install.js"
+  }
+}
