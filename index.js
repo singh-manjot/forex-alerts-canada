@@ -2,36 +2,24 @@ const functions = require("@google-cloud/functions-framework");
 const puppeteer = require("puppeteer");
 const axios = require("axios");
 const UserAgent = require("user-agents");
-// const downloadBrowsers = require("puppeteer/src/node/install")
+const sendgrid = require("@sendgrid/mail");
 
-const CA_COUNTRY_CODE = "+1";
-const PERSONAL_NUMBER = "2368823713";
-const TWILIO_NUMBER = "7787215623";
-
-functions.cloudEvent("forexRates", async (cloudEvent) => {
+functions.cloudEvent("forexRates", async () => {
   const marketRate = await getMarketRate();
-  const mgRate = await getRateFromExchangeService();
+  const exchangeRate = await getRateFromExchangeService();
 
-  console.log("MG rate: ", mgRate);
-  console.log("Market rate: ", marketRate);
+  logRates(marketRate, exchangeRate);
 
-  // const rateDiff = (marketRate - mgRate).toPrecision(3);
+  const rateDiff = (marketRate - exchangeRate).toPrecision(3);
 
-  // let standardMessage = `Market Rate: Rs.${marketRate}, MoneyGram Rate: Rs.${mgRate}(Rate diff:${rateDiff}). `;
-
-  // if (rateDiff < 0.5) {
-  //   console.log("Storing Rates...");
-  //   storeRates(marketRate, mgRate, rateDiff);
-  //   standardMessage += "Results stored in Firebase.";
-  // }
-
-  // if (rateDiff < 0.75) {
-  //   console.log(`Rate difference is good(${rateDiff}), sending SMS...`);
-  //   return sendSMS(standardMessage);
-  // } else {
-  //   console.log(`Rate Difference(Rs. ${marketRate} - Rs. ${mgRate} = ${rateDiff}) not good enough, no SMS sent.`);
-  //   return 0;
-  // }
+  if (rateDiff < 0.6) {
+    console.log(`Rate difference is good(${rateDiff}), sending email...`);
+    sendEmail(marketRate, exchangeRate);
+  } else {
+    console.log(
+      `Rate Difference is not good enough: (Rs: ${rateDiff}), no SMS sent.`
+    );
+  }
 });
 
 // Get Market data
@@ -54,6 +42,128 @@ const getMarketRate = async () => {
   return (exchangeData["INR"] ?? 0).toPrecision(4);
 };
 
+// Get Rate from Exchange Service
+const getRateFromExchangeService = async () => {
+  const page = await getPageFromPuppeteer();
+  const wuRate = await getRateFromWesternUnion(page);
+
+  return Number(wuRate).toPrecision(4);
+};
+
+const getRateFromMoneyGram = async (page) => {
+  let mgRate;
+
+  await page.goto("https://www.moneygram.com/mgo/ca/en/", {
+    waitUntil: "domcontentloaded",
+    timeout: 30000,
+  });
+
+  const receiverCountryField = await page.evaluate(() => {
+    return document.querySelector("#mfReceiverCountryField input");
+  });
+
+  if (receiverCountryField) {
+    await receiverCountryField.click({ clickCount: 2 });
+    await receiverCountryField.type("India");
+    await page.keyboard.press("Enter");
+    // await page.waitForSelector("#receiveAmount");
+
+    const mgRate = await page.evaluate(() => {
+      return document.querySelector("#receiveAmount").value;
+    });
+  }
+
+  return mgRate;
+};
+
+const getRateFromWesternUnion = async (page) => {
+  await page.goto("https://www.westernunion.com/ca/en/home.html", {
+    waitUntil: "domcontentloaded",
+    timeout: 30000,
+  });
+
+  await page.waitForSelector("li[data-currencycode='INR']");
+
+  await page.evaluate(() => {
+    // Click the list item with INR
+    document.querySelector("li[data-currencycode='INR']").click();
+  });
+
+  // Wait for dropdown to update to INR
+  await page.waitForFunction(
+    "document.getElementById('default-receiver-currency-code').innerText = \"INR\""
+  );
+
+  // Wait for exchange rate in span to update to INR 
+    await page.waitForFunction(
+      "document.querySelector(\"span[data-receiver-currency-fee='0.00']\").innerText.includes('INR')"
+    );
+
+  const forexText = await page.evaluate(() => {
+    // Get forex rate
+    return document.querySelector("span[data-receiver-currency-fee='0.00']")
+      .innerText;
+  });
+
+  return forexText.split(" ")[0];
+};
+
+const sendEmail = (marketRate, exchangeRate) => {
+  const canSendEmail = hasValidEmailRequirements();
+
+  if (canSendEmail) {
+    sendgrid.setApiKey(process.env.SENDGRID_API_KEY);
+    const email = {
+      to: process.env.RECEIVER_EMAIL,
+      from: process.env.SENDGRID_VERIFIED_SENDER,
+      subject: "Should we send money back home?",
+      text: "Good exchange rates detected by CR. You might wanna consider sending now!",
+      html: `<h2>Market Rate:<h2>${marketRate}<br><h2>Exchange Rate:<h2>${exchangeRate}<br>`,
+    };
+
+    sendgrid
+      .send(email)
+      .then(() => {
+        console.log("Email sent.");
+      })
+      .catch((error) => {
+        console.log(`Failed to send email: ${error}`);
+        console.log("Logging rates and exiting.");
+        logRates(marketRate, exchangeRate);
+      });
+  }
+};
+
+const logRates = (marketRate, exchangeRate) => {
+  console.log("Market rate: ", marketRate);
+  console.log("Exchange rate: ", exchangeRate);
+};
+
+const hasValidEmailRequirements = () => {
+  const apiKey = process.env.SENDGRID_API_KEY;
+  const sendgridVerifiedSender = process.env.SENDGRID_VERIFIED_SENDER;
+  const receiverEmail = process.env.RECEIVER_EMAIL;
+
+  if (!apiKey) {
+    console.log("Could not find email API key.");
+  }
+
+  if (!sendgridVerifiedSender) {
+    console.log("Could not find a verified sender email.");
+  }
+
+  if (!receiverEmail) {
+    console.log("Could not find an address to send email to.");
+  }
+
+  if (!apiKey || !sendgridVerifiedSender || !receiverEmail) {
+    console.log("Logging rates and exiting due to missing email information.");
+    logRates(marketRate, exchangeRate);
+  }
+
+  return apiKey && receiverEmail && receiverEmail;
+};
+
 const getPageFromPuppeteer = async () => {
   const userAgent = new UserAgent({
     deviceCategory: "desktop",
@@ -66,56 +176,4 @@ const getPageFromPuppeteer = async () => {
   });
 
   return browser.newPage();
-};
-
-// Get Rate from Exchange Service
-const getRateFromExchangeService = async () => {
-  const page = await getPageFromPuppeteer();
-
-  await page.goto("https://www.moneygram.com/mgo/ca/en/", {
-    waitUntil: "domcontentloaded",
-    timeout: 30000,
-  });
-
-  await page.waitForSelector("#getStarted");
-
-  //   page.evaluate(() => {
-  //     try {
-  //       document.querySelector("#truste-consent-track").style.display = "none";
-  //     } catch (e) {
-  //       console.log("Could not hide the consent footer!!");
-  //     }
-  //   });
-  //   page.evaluate(() => {
-  //     try {
-  //       document.querySelector(".cdk-overlay-container").style.display = "none";
-  //     } catch (e) {
-  //       console.log("Could not hide the modal!!");
-  //     }
-  //   });
-  const receiverCountryField = await page
-    .$("#mfReceiverCountryField")
-    .getElementsByTagName("input")[0];
-  await receiverCountryField.clickCount({ clickCount: 2 });
-  // Option India
-  await page.$("#mat-option-502").click();
-  //   const sendAmountInput = await page.$("#send");
-  //   await sendAmountInput.click({ clickCount: 3 });
-  //   await sendAmountInput.type("1");
-
-  //   const receiverCountryInput = await page.$("#receiveCountry");
-  //   await receiverCountryInput.type("India");
-
-  //   await page.keyboard.press("Enter");
-  //   await page.keyboard.press("Enter");
-
-  //   await page.waitForSelector("#receiveAmount");
-
-  //   const mgRate = await page.evaluate(() => {
-  //     return document.querySelector("#receiveAmount").value;
-  //   });
-
-  //   await browser.close();
-
-  return Number(0).toPrecision(4);
 };
